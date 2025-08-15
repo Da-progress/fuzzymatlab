@@ -1,0 +1,583 @@
+
+function [sys, x0, str, ts] = msf_BL_ship_vinh( t, x, u, flag, U_INI,V_INI,R_INI,X_INI,Y_INI,KURS_INI,S_ZAL)
+%
+% Nowa kolejnoœæ zmiennych stanu
+%
+% Wersja modelu matematycznego dynamiki statku Blue Lady 
+% przerobiona z csf_BL10_correct.c, po korekcjach dokonanych przez
+% Nguyen Cong Vinha
+%
+% MODEL MATEMATYCZNY DLA STATKU TRENINGOWEGO - SKALA LAMBDA = 1/24!!!
+
+% wektor stanu: x = [ u1 v r xpos ypos psi alfad ssod sstd sstr ssor alfar ng delta ]
+% gdzie:
+%        u1 - prêdkoœæ wzd³u¿na                                    [m/s]
+%        v  - prêdkoœæ poprzeczna                                  [m/s]
+%        r  - prêdkoœæ k¹towa                                     [deg/s]
+%      xpos - wspó³rzêdne po³o¿enia w osi x                          [m]
+%      ypos - wspó³rzedne po³o¿enia w osi y                          [m]
+%       psi - kurs statku                                          [deg]
+%     alfad - kat obrotu steru strum. obrotowego na dziobie        [deg]
+%      ssod - wzgledne obroty steru strum. obrotowego na dziobie    [-]
+%      sstd - wzgledne obroty steru strum. tunelowego na dziobie    [-]
+%      sstr - wzgledne obroty steru strum. tunelowego na rufie      [-]
+%      ssor - wzgledne obroty steru strum. obrotowego na rufie      [-]
+%     alfar - kat obrotu steru strum. obrotowego na rufie          [deg]
+%        ng - obroty sruby napedu glownego                       [obr/s]
+%     delta - kat wychylenia steru pletwowego                      [deg]
+%
+% wektor wejsciowy: u = [alfadz ssodz sstdz sstrz ssorz alfarz ngz deltaz Vwch gawch stan]
+% gdzie:
+%  alfadz - zadany kat obrotu steru strum. obrotowego na dziobie       (-120:+120)[deg]
+%   ssodz - zadane wzgledne obroty steru strum. obrotowego na dziobie  ( 0:+1)     [-]
+%   sstdz - zadane wzgledne obroty steru strum. tunelowego na dziobie  (-1:+1)     [-]
+%   sstrz - zadane wzgledne obroty steru strum. tunelowego na rufie    (-1:+1)     [-]
+%   ssorz - zadane wzgledne obroty steru strum. obrotowego na rufie    ( 0:+1)     [-]
+%  alfarz - zadany kat obrotu steru strum. obrotowego na rufie         ( 60:+300)[deg]
+%    ngz  - zadana pr. obr. sruby napedu glownego                      (-200:+480)[rpm]
+% deltazl - zadany kat wych. steru pletwowego                          (-35:+35)  [deg]
+%    Vwch - predkosc chwilowa wiatru                                   (-6:+6)    [m/s]
+%   gawch - chwilowy kierunek wiatru                                   (-180:+180)[deg]
+%    stan - stan zaladowania statku: 0 - balast, 1 - zaladowany                    [-]
+% 
+% Copyright (c) by Miros³aw Tomera
+% Data: 2011/07/30
+
+global tau_x tau_y tau_n
+
+switch flag, %#ok<NOCOL>
+   
+case 0, %#ok<NOCOL>
+   
+sizes = simsizes;
+
+sizes.NumContStates  = 14;
+sizes.NumDiscStates  =  0;
+sizes.NumOutputs     = 14;
+sizes.NumInputs      = 11;
+sizes.DirFeedthrough =  0;
+sizes.NumSampleTimes =  1;
+
+sys = simsizes(sizes);
+str = [];
+ts  = [0 0];
+x0 = zeros(14,1);
+
+x0(1) = U_INI;
+x0(2) = V_INI;
+x0(3) = R_INI;
+x0(4) = X_INI;
+x0(5) = Y_INI;
+x0(6) = KURS_INI;
+x0(7) = 0;
+x0(12) = 180; 
+
+tau_x = 0; 
+tau_y = 0;
+tau_n = 0;
+
+
+case 1 % derivatives
+   
+    ttime = t;
+% sprawdzenie wymiarów wektorów stanu i wejsc
+
+if nargin ~= 11,
+   if nargin == 0
+        flag = 0;
+   else
+        error('??? Zla liczba zmiennych wejsciowych.');
+   end
+end
+
+if ~(length(x) == 14), error('wektor stanu musi miec wymiar 14 (14 stanów + 3 sily)!');end
+if ~(length(u) == 11), error('wektor wejsc musi miec wymiar 11!');end
+
+% wymiarowe zmienne stanu i wejœæ
+ alfadz = u(1)*pi/180;
+  ssodz = u(2);  
+  sstdz = u(3);
+  sstrz = u(4);
+  ssorz = u(5);  
+ alfarz = u(6)*pi/180;   
+    ngz = u(7)/60;      
+ deltaz = u(8)*pi/180;
+   Xz   = u(9);   
+   Yz   = u(10);
+   Nz   = u(11);   
+   
+   stan = S_ZAL-1;
+  
+     u1 = x(1);             
+     v  = x(2);                
+     r  = x(3)*pi/180;
+    psi = x(6)*pi/180;     
+  alfad = x(7)*pi/180;    
+   ssod = x(8);    
+   sstd = x(9);
+   sstr = x(10);
+   ssor = x(11);
+  alfar = x(12)*pi/180;
+     ng = x(13);          % obroty w [obr/sek]! 
+  delta = x(14)*pi/180;     
+
+% DANE STATKU
+L   = 13.50;      B = 2.38;     Tb = 0.545;    Tz = 0.86;   Cb  = 0.83;
+tt  = 0.25;    wake = 0.3;    rhow = 1000;   rhop = 1.23;   rad = 57.2958;
+Axb = 3.57;     Ayb = 12.62;   Axz = 2.82;    Ayz = 8.46;    xa = 0.1;
+
+% dane steru
+Arud = 0.202;       hrud = 0.6;      crud = 0.34;   krud = 6.13;
+  ah = 0.176;   deltamax = 35;  ddeltamax = 12.2;  ratio = 1.7647;
+  
+% dane sruby napedu glownego
+Dprop = 0.384;  ngzmax = 480; ngzmin = -200;  dngzmax = 5;
+
+% dane napedow strumieniowych tunelowych
+   ssmax = 1;        dsstmaxd = 0.3;      dsstmaxr = 0.3;
+   a2sst = 0.05262;     a1sst = 0.1463;     a0sst = 1.0;
+   b2sst = 0.06155;     b1sst = 0.2281;     b0sst = 1.0;
+   
+% dane napedow strumieniowych obrotowych   
+alfadmax = 120;     alfarmin = 60;      alfarmax = 300;    
+dalfadmax = 20;    dalfarmax = 20;       dssomax = 0.3;   
+
+if u1 > 0.041  wakeef = wake;
+     else      wakeef = 0;    end
+
+if stan == 0   
+    T = Tb;  Ax = Axb;   Ay = Ayb;
+else
+    T = Tz;  Ax = Axz;   Ay = Ayz;
+end
+
+% wspólczynniki rozwiniecia w szereg Fouriera wartosci wsp. naporu Ct
+% na srubie ( B-Wageningen B5-75 P/D=1.14
+
+Bwag  = [0 5 10 20 40 60 80 100 120 140 160 180 200 220 240 260 280 300 320 340 360 365];
+Ctwag = [0.253 0.218 0.167 0.066 -0.212 -0.647 -0.824 -0.733 -0.738 -0.520 -0.283 ...
+         -0.182 -0.0404 0.253 0.632 0.985 0.697 0.839 0.657 0.354 0.253 0.218];
+
+% masy i momnty bezwladnosci
+M   = rhow*Cb*L*B*T;
+mx  = 0.5*rhow*Cb*B*(T)^2;
+my  = 0.5*rhow*pi*L*(T)^2*(1+0.16*Cb*B/T-5.1*(B/L)^2);
+Iz  = 1.4*(0.055*Cb+0.029)*M*(L)^2;
+izz = 0.5*rhow*pi*(L)^3*(T)^2*(1/12+0.017*Cb*B/T-0.33*B/L);
+k   = 2*T/L;
+Cd  = 1.1+0.045*L/T-0.27*B/T+0.016*(B/T)^2;
+
+% wspólczynniki hydrodynamiczne
+
+if u1 >= 0  
+    Xuu = -0.0334;
+else
+    Xuu = -0.28;
+end
+Xvr = (1.11*Cb-0.07)*my;
+Xvv = 0.4*T*B/L^2-0.006;
+Xrr = -0.0003;
+
+Yv  = -(pi/2*k+1.4*Cb*B/L)*T/L;
+Yr  = 0.25*pi*k*T/L;
+Yvv = -Cd*T/L;
+Yrr = xa^2*Cd*T/L;
+Yvr = -0.32*Cd*T/L;
+Yrv = 2*Cd*xa*T/L;
+
+Nv  = -k*T/L;
+Nvv = xa*Yvv;
+Nr  = (-0.54*k+k^2)*T/L;
+Nrr = -0.05*Cd*T/L;
+Nvr = xa*Yvr;
+Nrv = -0.01*Cd*T/L;
+
+Uo = sqrt ( (u1)^2 + (v)^2 );
+
+% kat dryfu
+if     (u1 > 0.001)  beta =-atan(v/u1);
+elseif (u1 <-0.001)  beta = atan(v/u1);
+elseif (abs(u1)< 0.001) & (v == 0)  beta = 0;
+elseif (abs(u1)< 0.001) & (v ~= 0)  beta =-pi/2*sign(v); 
+end
+
+%  SRUBA NAPEDU GLOWNEGO
+% ograniczenia, nasycenia i strefa martwa napedu
+if ngz >= ngzmax/60
+       ngz = ngzmax/60;  
+end
+if ngz <= ngzmin/60
+       ngz = ngzmin/60;     
+end   
+if abs(ngz - ng) < 1/60
+       ng = ngz;                   
+end
+dng = ngz - ng;
+if abs(dng) >= dngzmax/60
+       dng = sign(dng)*dngzmax/60; 
+end
+
+%  hydrodynamiczny kat skoku sruby napedu glownego 
+
+if abs(ng) > 0.001 
+     betasr = atan((u1*(1-wakeef))/(0.7*pi*ng*Dprop));
+   if ((Uo*sign(u1) > 0) & (ng < 0)) betasr = betasr + pi;  
+   end
+   if ((Uo*sign(u1) < 0) & (ng < 0)) betasr = betasr + pi;   
+   end
+   if ((Uo*sign(u1) < 0) & (ng > 0)) betasr = betasr + 2*pi; 
+   end
+else betasr = 0; 
+end
+
+% chwilowe wartosci wsp. naporu 
+
+Ct1 = 0;
+j = 1;
+while (betasr*rad) >= Bwag(j)
+      skok = Bwag(j+1)  - Bwag(j);
+      przyrost = Ctwag(j+1) - Ctwag(j);
+      Ct1 = Ctwag(j) + przyrost/skok*(betasr*rad - Bwag(j));
+      j = j + 1;
+end
+
+% wartosci naporu i momentu sruby napedu glownego
+Xprop =  1.25*0.5*rhow*Ct1*((u1*(1-wakeef))^2+(0.7*pi*ng*Dprop)^2)*pi/4*(Dprop)^2;
+Yprop =  0.04*Xprop;
+Nprop =  0.5*(0.04*Xprop)*L;
+
+% STER PLETWOWY
+% ograniczenia, nasycenia i strefa martwa steru
+if abs(r) < 2.3*pi/180
+       deltabis = 0.12373*x(3)^7 + 0.00214*x(3)^6 +...
+                  -1.6099*x(3)^5 - 0.021*x(3)^4 +...
+                  7.6595*x(3)^3 + 0.41024*x(3)^2 +...
+                  -12.763*x(3);
+    deltaz = deltaz;% + deltabis*pi/180;  % WYLACZENIE TEJ LINII WYLACZA NIESTATECZNOSC, DRUGA NA KONCU PROGRAMU!!!
+end
+
+if abs(deltaz) >= deltamax*pi/180
+       deltaz = sign(deltaz)*deltamax*pi/180;   
+end
+if abs(deltaz - delta) < 0.1*pi/180
+       delta = deltaz;                           
+end
+       ddelta = deltaz - delta;
+if abs(ddelta) >= ddeltamax*pi/180
+      ddelta = sign(ddelta)*ddeltamax*pi/180;    
+end
+     
+% wielkosci wewnetrzne steru
+if ng == 0
+   Ctbis = 0;
+else   
+   Ctbis = abs(Xprop)/(rhow*(ng)^2*(Dprop)^4);
+end 
+if Xprop * u1 >= 0
+        ual  = [-(1-wakeef)*u1+sqrt(((1-wakeef)*u1)^2+8*Ctbis*(ng*Dprop)^2/pi)]*sign(u1);
+        urud = sqrt(0.77*((1-wakeef)*u1+0.7*ual)^2+0.23*((1-wakeef)*u1)^2);   
+else    ual  = 0;
+        urud = u1 + [sqrt(0.77*8*Ctbis*(ng*Dprop)^2/pi)]*sign(ng);   
+end
+  
+vrud = v - 0.5*r*L;
+
+if   urud >  0.001                   betarud =-atan(vrud/urud); 
+end
+if   urud < -0.001                   betarud = atan(vrud/urud);   
+end
+if ((abs(urud)<0.001) & (vrud==0))   betarud = 0;                 
+end
+if ((abs(urud)<0.001) & (vrud~=0))   betarud =-pi/2*sign(vrud);   
+end
+
+if u1 >= 0
+   gamma = 0.8;
+   deltaef = delta + gamma*betarud;
+   if abs(deltaef) < 40/rad  
+      Frud = 0.5*rhow*krud*ratio/(ratio+2.25)*Arud*(urud)^2*sin(deltaef);
+   else 
+      Frud = 0;
+   end
+else
+   gamma = 1;
+   deltaef = delta + gamma*betarud;
+   if abs(deltaef) < 40/rad  
+      Frud = 0.3*0.5*rhow*krud*ratio/(ratio+2.25)*Arud*(urud)^2*sin(deltaef);
+   else 
+      Frud = 0;
+   end
+end
+if abs(delta*180/pi) < 10
+   kkorx = -40.55*abs(delta)+30.43;
+else
+   if delta*180/pi >= 10
+      kkorx = 1.5*cot(abs(delta)-6.5*pi/180)-1.7;
+   end
+   if delta*180/pi <= -10
+      kkorx = 1.5*cot(abs(delta)-6.5*pi/180)-1.2; 
+   end
+end
+
+% sily i moment steru pletwowego
+
+Frud = Frud*sign(u1);
+Frud;
+Xrud = -0.45*Frud*sin(delta)*kkorx;
+Yrud =  0.6*(1+ah)*Frud*cos(delta);
+Nrud = -0.7*0.52*(1+ah)*Frud*cos(delta)*L;
+
+% TUNELOWY STER STRUMIENIOWY NA DZIOBIE
+% ograniczenia, nasycenia i strefa martwa steru strumieniowego
+if abs(sstdz) >= ssmax
+       sstdz = sign(sstdz)*ssmax;    
+end
+if abs(sstdz - sstd) <= 0.01
+       sstd = sstdz;                 
+end
+dsstd = sstdz - sstd;
+if abs(dsstd) >= dsstmaxd
+       dsstd = sign(dsstd)*dsstmaxd;  
+end
+if abs(sstd) <= 0.01
+        sstd = 0;                    
+end
+
+% sila i moment steru strumieniowego na dziobie
+Ysstd0 = 0.8*sstd*44.145;
+Nsstd0 = 1.5*Ysstd0*0.35*L;
+Xsstd0 = abs(sstd)*15;
+if abs(u1) <= 1.45,
+    if u1 >= 0
+      Xsstd = Xsstd0*(a2sst*u1^2 - a1sst*u1 + a0sst);  
+      Ysstd = Ysstd0*(b2sst*u1^2 - b1sst*u1 + b0sst);
+      Nsstd = Nsstd0*(a2sst*u1^2 - a1sst*u1 + a0sst);
+    else
+      Xsstd = Xsstd0*(a2sst*u1^2 + a1sst*u1 + a0sst);  
+      Ysstd = Ysstd0*(a2sst*u1^2 + a1sst*u1 + a0sst);
+      Nsstd = Nsstd0*(b2sst*u1^2 + b1sst*u1 + b0sst);
+    end
+ else
+      Xsstd = 0;
+      Ysstd = 0;
+      Nsstd = 0;
+ end
+                   
+% TUNELOWY STER STRUMIENIOWY NA RUFIE
+% ograniczenia, nasycenia i strefa martwa steru strumieniowego
+if abs(sstrz) >= ssmax
+       sstrz = sign(sstrz)*ssmax;    
+end
+if abs(sstrz - sstr) <= 0.01
+       sstr = sstrz;                 
+end
+dsstr = sstrz - sstr;
+if abs(dsstr) >= dsstmaxr
+       dsstr = sign(dsstr)*dsstmaxr;  
+end
+if abs(sstr) <= 0.01
+        sstr = 0;                    
+end
+
+% sila i moment steru strumieniowego na rufie
+Ysstr0 = sstr*44.145;
+Nsstr0 =-0.6*Ysstr0*0.176*L;
+Xsstr0 = abs(sstr)*10;
+if abs(u1) <= 1.0  
+    if u1 >= 0
+      Xsstr = Xsstr0*(a2sst*u1^2 - a1sst*u1 + a0sst); 
+      Ysstr = Ysstr0*(a2sst*u1^2 - a1sst*u1 + a0sst);
+      Nsstr = Nsstr0*(b2sst*u1^2 - b1sst*u1 + b0sst);
+   else
+      Xsstr = Xsstr0*(a2sst*u1^2 + a1sst*u1 + a0sst); 
+      Ysstr = Ysstr0*(b2sst*u1^2 + b1sst*u1 + b0sst);
+      Nsstr = Nsstr0*(a2sst*u1^2 + a1sst*u1 + a0sst);
+    end
+ else
+      Xsstr = 0;
+      Ysstr = 0;
+      Nsstr = 0;
+ end
+                  
+% STER STRUMIENIOWY OBROTOWY NA DZIOBIE
+
+% ograniczenia, nasycenia i strefa martwa steru
+
+if abs(ssodz) >= ssmax
+       ssodz = sign(ssodz)*ssmax;    
+end
+if ssodz <= 0
+       ssodz = 0;                    
+end       
+if abs(ssodz - ssod) <= 0.01
+       ssod = ssodz;                 
+end
+dssod = ssodz - ssod;
+if abs(dssod) >= dssomax
+       dssod = sign(dssod)*dssomax;  
+end
+if abs(ssod) <= 0.01
+        ssod = 0;                    
+end
+   
+if abs(alfadz) >= alfadmax*pi/180
+   alfadz = alfadmax*pi/180*sign(alfadz);        
+end
+if abs(alfadz - alfad) < 0.1*pi/180
+       alfad = alfadz;                           
+end
+dalfad = alfadz - alfad;
+if abs(dalfad) >= dalfadmax*pi/180
+       dalfad = sign(dalfad)*dalfadmax*pi/180;   
+end
+
+% sila i moment steru strumieniowego na dziobie
+% Vinh
+usd = -(u1*cos(alfad-pi) + v*sin(alfad-pi));
+Fssod0 = ssod*35.316;
+Fssod  = Fssod0*(1-0.1*usd);
+Xssod  = 0.7*Fssod*cos(alfad);
+Yssod  = 0.7*Fssod*sin(alfad);
+Nssod  = Fssod*sin(alfad)*0.393*L;
+% Gierusz
+% usd = -(u1*cos(alfad-pi) + v*sin(alfad-pi));
+% Fssod0 = 0.8*ssod*35.316;
+% Fssod  = Fssod0*(1-0.2*usd);
+% Xssod  = 1.0*Fssod*cos(alfad);
+% Yssod  = 1.0*Fssod*sin(alfad);
+% Nssod  = 1.0*Fssod*sin(alfad)*0.393*L;
+
+% STER STRUMIENIOWY OBROTOWY NA RUFIE
+
+% ograniczenia, nasycenia i strefa martwa steru
+
+if abs(ssorz) >= ssmax
+       ssorz = sign(ssorz)*ssmax;    
+end
+if ssorz <= 0
+       ssorz = 0;                    
+end    
+if abs(ssorz - ssor) <= 0.01
+       ssor = ssorz;                 
+end
+dssor = ssorz - ssor;
+if abs(dssor) >= dssomax
+       dssor = sign(dssor)*dssomax;  
+end
+if abs(ssor) <= 0.01
+        ssor = 0;                    
+end
+
+if abs(alfarz) >= alfarmax*pi/180
+   alfarz = alfarmax*pi/180*sign(alfarz);        
+end
+if abs(alfarz) <= alfarmin*pi/180
+   alfarz = alfarmin*pi/180*sign(alfarz);        
+end
+if abs(alfarz - alfar) < 0.1*pi/180
+       alfar = alfarz;                           
+end
+dalfar = alfarz - alfar;
+if abs(dalfar) >= dalfarmax*pi/180
+       dalfar = sign(dalfar)*dalfarmax*pi/180;   
+end
+
+% sila i moment steru strumieniowego na rufie
+% Vinh
+usr = -(u1*cos(alfar-pi) + v*sin(alfar-pi));
+Fssor0 = ssor*36.297;
+Fssor  = 1.15*Fssor0*(1-0.1*usr);
+Xssor  = Fssor*cos(alfar);
+Yssor  = Fssor*sin(alfar);
+Nssor  =-0.6*Fssor*sin(alfar)*0.371*L;
+
+% Gierusz
+% usr = -(u1*cos(alfar-pi) + v*sin(alfar-pi));
+% Fssor0 = 0.9*ssor*36.297;
+% Fssor  = 1.0*Fssor0*(1-0.2*usr);
+% Xssor  = 1.0*Fssor*cos(alfar);
+% Yssor  = 1.0*Fssor*sin(alfar);
+% Nssor  =-1.0*Fssor*sin(alfar)*0.371*L;
+
+% SILY I MOMENTY HYDRODYNAMICZNE DZIALAJACE NA KADLUB
+
+Rh  = 0.5*rhow*L*T*Xuu*u1*abs(u1);
+Xh1 = Xvr*v*r;
+Xh2 = Xvv*(v)^2*0.5*rhow*L*T;
+Xh3 = Xrr*(r)^2*0.5*rhow*(L)^3*T;
+
+Yh1 = (Yv*v*abs(u1) + Yvv*v*abs(v))*0.5*rhow*(L)^2;
+Yh2 = (Yr*r*abs(u1) + Yrr*r*abs(r)*L)*0.5*rhow*(L)^3;
+Yh3 = (Yvr*v*abs(r) + Yrv*r*abs(v))*0.5*rhow*(L)^3;
+
+%Nh1 = (Nv*v*abs(u1) + Nvv*v*abs(v))*0.5*rhow*(L)^3;
+Nh2 = (Nr*r*abs(u1) + Nrr*r*abs(r)*L)*0.5*rhow*(L)^4;
+Nh3 = (-Nvr*v*abs(r) + Nrv*r*abs(v))*0.5*rhow*(L)^4;
+
+% BILANS SIL
+tau_x = (1-tt)*Xprop + Xrud + Xssod + Xssor;% + Xw;
+tau_y =  Yprop + Yrud + Yssod + Ysstd + Ysstr + Yssor;% + Yw;
+tau_n = Nprop + Nrud + Nssod + Nsstd + Nsstr + Nssor;% + Nw;
+
+Xtot = Rh + Xh1 + Xh2 + Xh3 + tau_x;
+Ytot = Yh1 + Yh2 + Yh3 + tau_y;
+Ntot = Nh2 + Nh3 + tau_n;
+
+% wymiarowe pochodne zmiennych stanu
+ttime = t;
+
+   dx = [        (Xtot + M*v*r)/(M + mx)
+            (Ytot - (M + mx)*u1*r)/(M + my)
+                   Ntot/(Iz + izz)*180/pi
+               u1*cos(psi) - v*sin(psi)
+               u1*sin(psi) + v*cos(psi)
+                     r*180/pi               
+                     dalfad*180/pi
+                     dssod                     
+                     dsstd                     
+                     dsstr
+                     dssor     
+                     dalfar*180/pi
+                     dng
+                     ddelta*180/pi];
+
+
+ttime = t;
+if ttime > 1,
+   as = 0; 
+end    
+
+		sys = dx;
+
+case 3,
+    qq = x;
+
+    kurs = qq(6);
+    kurs = mod( kurs, 360);
+    if kurs < 0,
+        kurs = 360 + kurs;    
+    end  
+    qq(6) = kurs;       
+    
+%     if abs(x(3)) < 2.3
+%        deltabis = 0.12373*x(3)^7 + 0.00214*x(3)^6 +...
+%                   -1.6099*x(3)^5 - 0.021*x(3)^4 +...
+%                   7.6595*x(3)^3 + 0.41024*x(3)^2 +...
+%                   -12.763*x(3);
+%               
+%        % DRUGIE MIEJSCE, KTORE TRZEBA WYLACZYC, ZEBY MIEC STATECZNOSC KURSOWA!!!                   
+%        qq(14) = qq(14) - deltabis;   
+%     end
+    
+
+    
+	sys = qq;% tau_x; tau_y; tau_n];
+
+case {2, 4, 9},
+     
+    sys = [];
+     
+otherwise 
+     error(['unhandled flag = ',num2str(flag)]);
+end
+
